@@ -57,7 +57,10 @@ class State(InputState):
     """List of decomposed questions that need to be answered"""
     
     answers: dict[str, str] = field(default_factory=dict)
-    """Dictionary mapping questions to their answers"""
+    """Dictionary mapping questions to their SQL query answers"""
+    
+    semantic_answers: dict[str, str] = field(default_factory=dict)
+    """Dictionary mapping questions to their semantic search answers"""
     
     current_context: dict = field(default_factory=dict)
     """Accumulated context from previous answers"""
@@ -66,7 +69,10 @@ class State(InputState):
     """Flag indicating if question decomposition is complete"""
     
     all_questions_answered: bool = field(default=False)
-    """Flag indicating if all sub-questions have been answered"""
+    """Flag indicating if all SQL sub-questions have been answered"""
+    
+    all_semantic_questions_answered: bool = field(default=False)
+    """Flag indicating if all semantic search sub-questions have been answered"""
 
     # Additional attributes can be added here as needed.
     # Common examples include:

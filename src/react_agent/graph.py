@@ -4,12 +4,16 @@ Works with a chat model with tool calling support.
 """
 
 from datetime import datetime, timezone
-from typing import Dict, List, Literal, cast, Union, Set
+from typing import Dict, List, Literal, cast, Union, Set, Annotated
+import base64
+
 import pandas as pd
 from vanna.remote import VannaDefault
 from vanna.flask import VannaFlaskApp
 from react_agent.gryps_utils import get_ims_handler_from_env, IMSQueryHandler
- 
+
+from litellm import embedding, completion
+import typesense
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
@@ -20,9 +24,32 @@ from react_agent.state import InputState, State
 from react_agent.tools import TOOLS
 from react_agent.utils import load_chat_model
 
+import operator
+
 # Global VannaDefault instance
 _vanna_instance = None
+_typesense_client = None
 _failed_queries: Set[str] = set()
+
+def get_typesense_client():
+    global _typesense_client
+
+    if _typesense_client is None:
+        _typesense_client = typesense.Client(
+            {
+                "nodes": [
+                    {
+                    "host": "localhost",
+                    "port": "8108",
+                    "protocol": "http",
+                }
+            ],
+            "api_key": "admin",
+            "connection_timeout_seconds": 2,
+        }
+    )
+        
+    return _typesense_client
 
 def get_vanna_instance() -> VannaDefault:
     """Get or create the VannaDefault singleton instance."""
@@ -45,6 +72,16 @@ def run_sql(sql: str, sql_client: IMSQueryHandler, db: str) -> pd.DataFrame:
     """Execute SQL query using the IMS Query Handler."""
     sql_client = get_ims_handler_from_env()
     return sql_client.query(query=sql, database=db)
+
+def image_to_base64(input_path: str):
+    with open(input_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
+    
+def get_image_embedding(input_path: str):
+    with open(input_path, "rb") as image_file:
+        response = embedding(model="cohere/embed-english-v3.0", input=[image_to_base64(input_path)])
+
+    return response.data[0]["embedding"]
 
 def train_natural_language_to_sql() -> VannaDefault:
     vanna_model_name = 'contech'    
@@ -85,21 +122,40 @@ async def decompose_question(state: State, config: RunnableConfig) -> Dict:
         # Create a system prompt for question decomposition
         system_message = SystemMessage(content="""You are an expert at breaking down complex construction-related questions into sequential, query-able sub-questions.
 
+You have access to two specific NYC building data sources:
+
+1. Vector Store containing Certificate of Occupancy (CO) PDFs for 4 specific NYC buildings
+   - These COs contain official occupancy information and building details
+   - Limited to only 4 buildings' CO documentation
+
+2. Department of Buildings (DoB) BIS Database containing:
+   - Building complaints
+   - Violations
+   - Job filing documents
+   - Zoning documents
+   - Virtual jobs
+   - Other structured building-related data
+
 Each sub-question should:
-1. Be self-contained and answerable with a single SQL query
+1. Be self-contained and answerable with a single SQL query or vector store search
 2. Build on previous questions' answers when needed
 3. Be ordered logically where later questions may depend on earlier answers
 4. Use precise language
 5. Use as few questions as possible - if the original question can be answered with a single query, do not break it down further
 6. Never break down into more than 3 sub-questions
-7. Only output the numbered questions, nothing else
+7. Only reference information available in the two data sources
+8. Only output the numbered questions, nothing else
+9. Make sure that you don't give ANY directions or ask for any addresses
+                                       10. JUST output short questions
 
 For example, if asked "What are the trends in permit applications across different boroughs and building types?", you would output exactly:
 1. What is the distribution of permit applications by borough and building type over time?
 2. What are the month-over-month changes in application volume?
 
 However, a simple question like "How many active construction permits are there in Manhattan?" should output exactly:
-1. How many active construction permits are there in Manhattan?""")
+1. How many active construction permits are there in Manhattan?
+
+For questions about Certificates of Occupancy, remember you can only reference the 4 buildings in the vector store.""")
 
         
         # Ask the model to decompose the question
@@ -168,30 +224,130 @@ async def query_execution(state: State, config: RunnableConfig) -> Dict:
             "messages": [AIMessage(content=f"Failed to execute query for: {current_question}\nError: {str(e)}\nSkipping this question permanently.")]
         }
 
+def gather_query_context(query: str):
+  embedding_str = ','.join(str(v) for v in embedding(
+    model="cohere/embed-english-v3.0", 
+    input=[query]
+  ).data[0]["embedding"])
+
+  searches = {
+    "searches": [
+      {
+        "query_by": "content",
+        "q": query,
+        "exclude_fields": "embedding"
+      }
+    ]
+  }
+
+  search_parameters = {
+    "collection": "pdfs",
+    "vector_query": f"embedding:([{embedding_str}], alpha: 0.4, k: 4)",
+    "per_page": 25,
+  }
+
+  results = get_typesense_client().multi_search.perform(searches, search_parameters)
+  print("RESULTS", results)
+  return results
+
+
+def synthesize_query(query: str):
+    # Get context
+    context = gather_query_context(query)
+    base64_images = []
+    
+    # Get images from context
+    for result in context["results"][0]["hits"]:
+        image_base64 = image_to_base64(
+            f"data/images/{result['document']['source_filename']}/page_{result['document']['page_number']}.png"
+        )
+
+        base64_images.append(image_base64)
+
+    # Respond to query using images
+    image_query_response = completion(
+        model="openai/gpt-4o",
+        # response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": "Attempt to answer the following query using the following images"},
+            {"role": "user", "content": f"Query: {query}"},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        }
+                    } for base64_image in base64_images
+                ]
+            }
+        ],
+    )
+    return image_query_response.choices[0].message.content
+
+async def semantic_search_execution(state: State, config: RunnableConfig) -> Dict:
+    """Execute semantic search queries in parallel with SQL queries."""
+    if not state.sub_questions:
+        return {"all_semantic_questions_answered": True}
+        
+    current_question = next((q for q in state.sub_questions if q not in state.semantic_answers), None)
+    
+    if current_question is None:
+        return {"all_semantic_questions_answered": True}
+    
+    try:
+        # Use actual semantic search implementation
+        semantic_answer = synthesize_query(current_question)
+        print("SEMANTIC ANSWER", semantic_answer)
+        
+        # Update semantic answers
+        new_semantic_answers = dict(state.semantic_answers)
+        new_semantic_answers[current_question] = semantic_answer
+        
+        # Check if this was the last question
+        all_answered = len(new_semantic_answers) == len(state.sub_questions)
+        
+        return {
+            "semantic_answers": new_semantic_answers,
+            "current_context": {"last_semantic_search": current_question},
+            "all_semantic_questions_answered": all_answered,
+            "messages": [AIMessage(content=f"Found semantic search result for: {current_question}\n{semantic_answer}")]
+        }
+    except Exception as e:
+        return {
+            "messages": [AIMessage(content=f"Failed semantic search for: {current_question}\nError: {str(e)}")]
+        }
+
 async def synthesize_answers(state: State, config: RunnableConfig) -> Dict:
     """Synthesize all answers into a final response that directly addresses the original question."""
-    if state.all_questions_answered:
+    print("ANSWERS", state)
+    if state.all_questions_answered and state.all_semantic_questions_answered:
+        print(state.semantic_answers)
         configuration = Configuration.from_runnable_config(config)
         model = load_chat_model(configuration.model)
         
-        # Get the original question from the first message
         original_question = state.messages[0].content
         
-        # Prepare the context for synthesis
         context = "Here are the results from our analysis:\n\n"
-        for question, answer in state.answers.items():
-            context += f"Question: {question}\nAnswer: {answer}\n\n"
+        
+        # Include both SQL query results and semantic search results
+        for question in state.sub_questions:
+            context += f"Question: {question}\n"
+            if question in state.answers:
+                context += f"SQL Query Result: {state.answers[question]}\n"
+            if question in state.semantic_answers:
+                context += f"Semantic Search Result: {state.semantic_answers[question]}\n"
+            context += "\n"
             
-        # Create a system prompt for synthesis
         system_message = SystemMessage(content="""You are an expert at synthesizing information to answer questions about construction and building data.
 Your task is to:
-1. Review the original question and available answers
+1. Review the original question and available answers from both SQL queries and semantic search
 2. Determine if the information is sufficient and relevant to answer the original question
 3. If the information is insufficient or irrelevant, clearly state that an answer cannot be generated
 4. If the information is useful, provide a clear, concise synthesis that directly answers the original question
 5. Only include relevant information in your response""")
         
-        # Ask the model to synthesize
         response = await model.ainvoke(
             [
                 system_message,
@@ -267,6 +423,7 @@ builder = StateGraph(State, input=InputState, config_schema=Configuration)
 # Add nodes
 builder.add_node("decompose", decompose_question)
 builder.add_node("execute_query", query_execution)
+builder.add_node("semantic_search", semantic_search_execution)
 builder.add_node("synthesize", synthesize_answers)
 builder.add_node("call_model", call_model)
 builder.add_node("tools", ToolNode(TOOLS))
@@ -274,11 +431,12 @@ builder.add_node("tools", ToolNode(TOOLS))
 # Set the entrypoint
 builder.add_edge("__start__", "decompose")
 
-def route_decomposition(state: State) -> Literal["execute_query", "call_model"]:
-    """Route after decomposition."""
+def route_decomposition(state: State) -> List[str]:
+    """Route after question decomposition."""
     if state.is_decomposition_done:
-        return "execute_query"
-    return "call_model"
+        # Fan out to both query execution and semantic search
+        return ["execute_query", "semantic_search"]
+    return ["call_model"]
 
 def route_execution(state: State) -> Literal["synthesize", "execute_query"]:
     """Route after query execution."""
@@ -286,56 +444,44 @@ def route_execution(state: State) -> Literal["synthesize", "execute_query"]:
         return "synthesize"
     return "execute_query"
 
+def route_semantic_search(state: State) -> Literal["synthesize", "semantic_search"]:
+    """Route after semantic search."""
+    if state.all_semantic_questions_answered:
+        return "synthesize"
+    return "semantic_search"
+
 def route_synthesis(state: State) -> Literal["__end__"]:
     """Route after synthesis."""
     return "__end__"
 
 def route_model_output(state: State) -> Literal["__end__", "tools"]:
-    """Determine the next node based on the model's output."""
-    last_message = state.messages[-1]
-    if not isinstance(last_message, AIMessage):
-        raise ValueError(
-            f"Expected AIMessage in output edges, but got {type(last_message).__name__}"
-        )
-    if not last_message.tool_calls:
+    """Route after model output."""
+    if state.is_last_step:
         return "__end__"
     return "tools"
 
-# Add conditional edges for routing logic
+# Add conditional edges for branching logic
 builder.add_conditional_edges(
     "decompose",
     route_decomposition,
-    {
-        "execute_query": "execute_query",
-        "call_model": "call_model"
-    }
+    ["execute_query", "semantic_search", "call_model"]
 )
 
+# Add recursive edges for execution nodes
 builder.add_conditional_edges(
     "execute_query",
     route_execution,
-    {
-        "synthesize": "synthesize",
-        "execute_query": "execute_query"
-    }
+    {"synthesize": "synthesize", "execute_query": "execute_query"}
 )
 
 builder.add_conditional_edges(
-    "synthesize",
-    route_synthesis,
-    {
-        "__end__": "__end__"
-    }
+    "semantic_search",
+    route_semantic_search,
+    {"synthesize": "synthesize", "semantic_search": "semantic_search"}
 )
 
-builder.add_conditional_edges(
-    "call_model",
-    route_model_output,
-    {
-        "__end__": "__end__",
-        "tools": "tools"
-    }
-)
+# Add edge to end
+builder.add_edge("synthesize", "__end__")
 
 # Add regular edge for tools back to model
 builder.add_edge("tools", "call_model")
