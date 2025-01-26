@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Sequence, Self
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
@@ -62,8 +62,11 @@ class State(InputState):
     semantic_answers: dict[str, str] = field(default_factory=dict)
     """Dictionary mapping questions to their semantic search answers"""
     
-    current_context: dict = field(default_factory=dict)
-    """Accumulated context from previous answers"""
+    sql_context: dict = field(default_factory=dict)
+    """Context for SQL query execution"""
+    
+    semantic_context: dict = field(default_factory=dict)
+    """Context for semantic search execution"""
     
     is_decomposition_done: bool = field(default=False)
     """Flag indicating if question decomposition is complete"""
@@ -73,6 +76,23 @@ class State(InputState):
     
     all_semantic_questions_answered: bool = field(default=False)
     """Flag indicating if all semantic search sub-questions have been answered"""
+
+    def reset(self) -> Self:
+        """Reset all mutable state fields to their default values.
+        
+        Returns:
+            Self: The state instance with reset values
+        """
+        self.messages = []
+        self.sub_questions = []
+        self.answers = {}
+        self.semantic_answers = {}
+        self.sql_context = {}
+        self.semantic_context = {}
+        self.is_decomposition_done = False
+        self.all_questions_answered = False
+        self.all_semantic_questions_answered = False
+        return self
 
     # Additional attributes can be added here as needed.
     # Common examples include:

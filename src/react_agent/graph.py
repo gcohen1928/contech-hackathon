@@ -16,7 +16,7 @@ from litellm import embedding, completion
 import typesense
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph import StateGraph
+from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
 from react_agent.configuration import Configuration
@@ -84,8 +84,8 @@ def get_image_embedding(input_path: str):
     return response.data[0]["embedding"]
 
 def train_natural_language_to_sql() -> VannaDefault:
-    vanna_model_name = 'contech'    
-    vn = VannaDefault(model=vanna_model_name, api_key='27db8165836f4265b58df4ef4279b3e2')
+    vanna_model_name = 'contech1'    
+    vn = VannaDefault(model=vanna_model_name, api_key='9bb6772c72cf4cc6922aa7106a5789f9')
     sql_client = get_ims_handler_from_env()
 
     vn.run_sql = run_sql
@@ -97,8 +97,8 @@ def train_natural_language_to_sql() -> VannaDefault:
     return vn
 
 def execute_natural_language_to_sql(prompt: str) -> pd.DataFrame:
-    vanna_model_name = 'contech'    
-    vn = VannaDefault(model=vanna_model_name, api_key='27db8165836f4265b58df4ef4279b3e2')
+    vanna_model_name = 'contech1'    
+    vn = VannaDefault(model=vanna_model_name, api_key='9bb6772c72cf4cc6922aa7106a5789f9')
     if vn.get_training_data().empty:
         vn = train_natural_language_to_sql()
     sql_client = get_ims_handler_from_env()
@@ -113,6 +113,12 @@ def execute_natural_language_to_sql(prompt: str) -> pd.DataFrame:
 # Mock functions for demonstration
 async def decompose_question(state: State, config: RunnableConfig) -> Dict:
     """Function to decompose the main question into sequential, query-able sub-questions."""
+    # Reset state if this is a new question (detected by checking if the last message is from human)
+    if state.messages and isinstance(state.messages[-1], HumanMessage):
+        latest_message = state.messages[-1]  # Save the latest human message
+        state.reset()
+        state.messages = [latest_message]  # Restore the latest human message
+        
     if not state.is_decomposition_done:
         configuration = Configuration.from_runnable_config(config)
         model = load_chat_model(configuration.model)
@@ -308,9 +314,13 @@ async def semantic_search_execution(state: State, config: RunnableConfig) -> Dic
         # Check if this was the last question
         all_answered = len(new_semantic_answers) == len(state.sub_questions)
         
+        # Update semantic context
+        new_semantic_context = dict(state.semantic_context)
+        new_semantic_context["last_search"] = current_question
+        
         return {
             "semantic_answers": new_semantic_answers,
-            "current_context": {"last_semantic_search": current_question},
+            "semantic_context": new_semantic_context,
             "all_semantic_questions_answered": all_answered,
             "messages": [AIMessage(content=f"Found semantic search result for: {current_question}\n{semantic_answer}")]
         }
@@ -321,50 +331,69 @@ async def semantic_search_execution(state: State, config: RunnableConfig) -> Dic
 
 async def synthesize_answers(state: State, config: RunnableConfig) -> Dict:
     """Synthesize all answers into a final response that directly addresses the original question."""
-    print("ANSWERS", state)
-    if state.all_questions_answered and state.all_semantic_questions_answered:
-        print(state.semantic_answers)
-        configuration = Configuration.from_runnable_config(config)
-        model = load_chat_model(configuration.model)
-        
-        original_question = state.messages[0].content
-        
-        context = "Here are the results from our analysis:\n\n"
-        
-        # Include both SQL query results and semantic search results
-        for question in state.sub_questions:
-            context += f"Question: {question}\n"
-            if question in state.answers:
-                context += f"SQL Query Result: {state.answers[question]}\n"
-            if question in state.semantic_answers:
-                context += f"Semantic Search Result: {state.semantic_answers[question]}\n"
-            context += "\n"
+    try:
+        print("ANSWERS", state)
+        if state.all_questions_answered and state.all_semantic_questions_answered:
+            print(state.semantic_answers)
+            configuration = Configuration.from_runnable_config(config)
+            model = load_chat_model(configuration.model)
             
-        system_message = SystemMessage(content="""You are an expert at synthesizing information to answer questions about construction and building data.
+            original_question = state.messages[0].content
+            
+            context = "Here are the results from our analysis:\n\n"
+            
+            # Include both SQL query results and semantic search results
+            for question in state.sub_questions:
+                context += f"Question: {question}\n"
+                if question in state.answers:
+                    context += f"SQL Query Result: {state.answers[question]}\n"
+                if question in state.semantic_answers:
+                    context += f"Semantic Search Result: {state.semantic_answers[question]}\n"
+                context += "\n"
+                
+            system_message = SystemMessage(content="""You are an expert at synthesizing information to answer questions about construction and building data.
 Your task is to:
 1. Review the original question and available answers from both SQL queries and semantic search
 2. Determine if the information is sufficient and relevant to answer the original question
 3. If the information is insufficient or irrelevant, clearly state that an answer cannot be generated
 4. If the information is useful, provide a clear, concise synthesis that directly answers the original question
 5. Only include relevant information in your response""")
-        
-        response = await model.ainvoke(
-            [
-                system_message,
-                HumanMessage(content=f"""Original Question: {original_question}
+            
+            try:
+                response = await model.ainvoke(
+                    [
+                        system_message,
+                        HumanMessage(content=f"""Original Question: {original_question}
 
 Available Information:
 {context}
 
 Please synthesize this information to answer the original question, or indicate if an answer cannot be generated.""")
-            ],
-            config
-        )
-        
+                    ],
+                    config
+                )
+            except Exception as e:
+                return {
+                    "messages": [AIMessage(content=f"Error during synthesis: {str(e)}")]
+                }
+            
+            # Reset flags and state for next question
+            return {
+                "messages": [AIMessage(content=response.content)],
+                "all_questions_answered": False,
+                "all_semantic_questions_answered": False,
+                "is_decomposition_done": False,
+                "sub_questions": [],
+                "answers": {},
+                "semantic_answers": {},
+                "sql_context": {},
+                "semantic_context": {}
+            }
+    except Exception as e:
         return {
-            "messages": [AIMessage(content=response.content)]
+            "messages": [AIMessage(content=f"Unexpected error during synthesis: {str(e)}")]
         }
-    return {}
+    return {"messages": [AIMessage(content="Still gathering information from queries and semantic search...")]}
 
 # Define the function that calls the model
 
