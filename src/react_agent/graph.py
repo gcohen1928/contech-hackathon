@@ -180,7 +180,7 @@ async def extract_question(state: State, config: RunnableConfig) -> State:
 
 
 # Mock functions for demonstration
-async def plan_question(state: State, config: RunnableConfig) -> Dict:
+async def plan_question(state: State, config: RunnableConfig) -> State:
     """Function to decompose the main question into sequential, query-able sub-questions."""
     # Reset state if this is a new question (detected by checking if the last message is from human)
     # TODO: retrieve question from state
@@ -266,7 +266,7 @@ async def plan_question(state: State, config: RunnableConfig) -> Dict:
     }
 
 
-async def determine_sql_subquestions(state: State, config: RunnableConfig) -> Dict:
+async def determine_sql_subquestions(state: State, config: RunnableConfig) -> State:
     """Determine the SQL subquestions to answer."""
     available_databases = [
         ctx.replace("databases/", "")
@@ -314,7 +314,9 @@ async def determine_sql_subquestions(state: State, config: RunnableConfig) -> Di
     }
 
 
-async def determine_semantic_subquestions(state: State, config: RunnableConfig) -> Dict:
+async def determine_semantic_subquestions(
+    state: State, config: RunnableConfig
+) -> State:
     """Determine the semantic subquestions to answer."""
     available_documents = [
         ctx.replace("data/Certificates of Occupancy", "")
@@ -362,7 +364,7 @@ async def determine_semantic_subquestions(state: State, config: RunnableConfig) 
     }
 
 
-async def query_execution(state: State, config: RunnableConfig) -> Dict:
+async def query_execution(state: State, config: RunnableConfig) -> State:
     """Execute natural language queries using Vanna."""
     global _failed_queries
 
@@ -431,7 +433,7 @@ async def query_execution(state: State, config: RunnableConfig) -> Dict:
         }
 
 
-def gather_query_context(query: str):
+def gather_query_context(query: str, allowed_filenames: List[str]):
     embedding_str = ",".join(
         str(v)
         for v in embedding(model="cohere/embed-english-v3.0", input=[query]).data[0][
@@ -446,6 +448,7 @@ def gather_query_context(query: str):
     search_parameters = {
         "collection": "pdfs",
         "vector_query": f"embedding:([{embedding_str}], alpha: 0.4, k: 4)",
+        "filter_by": f"source_filename:{[f'`{filename}`' for filename in allowed_filenames]}",
         "per_page": 25,
     }
 
@@ -454,9 +457,9 @@ def gather_query_context(query: str):
     return results
 
 
-async def synthesize_query(query: str):
+async def synthesize_query(query: str, allowed_filenames: List[str]):
     # Get context
-    context = gather_query_context(query)
+    context = gather_query_context(query, allowed_filenames)
     base64_images = []
 
     # Get images from context
@@ -492,7 +495,7 @@ async def synthesize_query(query: str):
     return image_query_response.choices[0].message.content
 
 
-async def semantic_search_execution(state: State, config: RunnableConfig) -> Dict:
+async def semantic_search_execution(state: State, config: RunnableConfig) -> State:
     """Execute semantic search queries in parallel with SQL queries."""
     # if not state.sub_questions:
     #     return {"all_semantic_questions_answered": True}
@@ -503,11 +506,18 @@ async def semantic_search_execution(state: State, config: RunnableConfig) -> Dic
 
     # if current_question is None:
     #     return {"all_semantic_questions_answered": True}
+    print("SEMANTIC STATE EXECUTION:", state)
+
     current_question = state["current_semantic_sub_question"]
+    allowed_filenames = [
+        os.path.basename(ctx)
+        for ctx in state["allowed_context"]
+        if "data/Certificates of Occupancy" in ctx
+    ]
 
     try:
         # Use actual semantic search implementation
-        semantic_answer = await synthesize_query(current_question)
+        semantic_answer = await synthesize_query(current_question, allowed_filenames)
         print("SEMANTIC ANSWER", f"{current_question}: {semantic_answer}")
 
         return {
@@ -547,7 +557,7 @@ async def semantic_search_execution(state: State, config: RunnableConfig) -> Dic
         }
 
 
-async def synthesize_answers(state: State, config: RunnableConfig) -> Dict:
+async def synthesize_answers(state: State, config: RunnableConfig) -> State:
     """Synthesize all answers into a final response that directly addresses the original question."""
     print("SYNTHESIZE ANSWERS STATE", state)
 
@@ -685,18 +695,24 @@ def route_decomposition(state: State) -> List[str]:
 
 
 def route_sql_subqueries(state: State) -> List[str]:
-    print("SQL SUBQUESTIONS", state.sql_sub_questions)
-
     return [
-        Send("execute_query", {"current_sql_sub_question": sq})
+        Send(
+            "execute_query",
+            {"current_sql_sub_question": sq, "allowed_context": state.allowed_context},
+        )
         for sq in state.sql_sub_questions
     ]
 
 
 def route_semantic_subqueries(state: State) -> List[str]:
-    print("SEMANTIC SUBQUESTIONS", state.semantic_sub_questions)
     return [
-        Send("semantic_search", {"current_semantic_sub_question": sq})
+        Send(
+            "semantic_search",
+            {
+                "current_semantic_sub_question": sq,
+                "allowed_context": state.allowed_context,
+            },
+        )
         for sq in state.semantic_sub_questions
     ]
 
