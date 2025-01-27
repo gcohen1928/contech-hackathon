@@ -4,12 +4,16 @@ Works with a chat model with tool calling support.
 """
 
 from datetime import datetime, timezone
+import os
 from typing import Dict, List, Literal, cast, Union, Set, Annotated
 import base64
 
 import pandas as pd
-from vanna.remote import VannaDefault
-from vanna.flask import VannaFlaskApp
+
+# from vanna.remote import VannaDefault
+# from vanna.flask import VannaFlaskApp
+from vanna.openai import OpenAI_Chat
+from vanna.chromadb import ChromaDB_VectorStore
 from react_agent.gryps_utils import get_ims_handler_from_env, IMSQueryHandler
 
 from litellm import embedding, completion
@@ -24,12 +28,11 @@ from react_agent.state import InputState, State
 from react_agent.tools import TOOLS
 from react_agent.utils import load_chat_model
 
-import operator
-
 # Global VannaDefault instance
 _vanna_instance = None
 _typesense_client = None
 _failed_queries: Set[str] = set()
+
 
 def get_typesense_client():
     global _typesense_client
@@ -39,76 +42,102 @@ def get_typesense_client():
             {
                 "nodes": [
                     {
-                    "host": "localhost",
-                    "port": "8108",
-                    "protocol": "http",
-                }
-            ],
-            "api_key": "admin",
-            "connection_timeout_seconds": 2,
-        }
-    )
-        
+                        "host": "localhost",
+                        "port": "8108",
+                        "protocol": "http",
+                    }
+                ],
+                "api_key": "admin",
+                "connection_timeout_seconds": 2,
+            }
+        )
+
     return _typesense_client
 
-def get_vanna_instance() -> VannaDefault:
+
+class VannaInstance(ChromaDB_VectorStore, OpenAI_Chat):
+    def __init__(self, config=None):
+        ChromaDB_VectorStore.__init__(self, config=config)
+        OpenAI_Chat.__init__(self, config=config)
+
+
+def get_vanna_instance() -> VannaInstance:
     """Get or create the VannaDefault singleton instance."""
     global _vanna_instance
     if _vanna_instance is None:
-        vanna_model_name = 'lmao-model-watup'    
-        vn = VannaDefault(model=vanna_model_name, api_key='1873d412c54d469c9fa46d05aec90ed4')
+        # vanna_model_name = "contech1"
+        # vn = VannaDefault(model=vanna_model_name, api_key='1873d412c54d469c9fa46d05aec90ed4')
+        vn = VannaInstance(
+            config={"api_key": os.getenv("OPENAI_API_KEY"), "model": "gpt-4o"}
+        )
         sql_client = get_ims_handler_from_env()
 
         vn.run_sql = run_sql
         vn.run_sql_is_set = True
-        
-        df_information_schema = vn.run_sql("SELECT * FROM INFORMATION_SCHEMA.COLUMNS", sql_client=sql_client, db='dob_bis')
+
+        df_information_schema = vn.run_sql(
+            "SELECT * FROM INFORMATION_SCHEMA.COLUMNS",
+            sql_client=sql_client,
+            db="dob_bis",
+        )
         plan = vn.get_training_plan_generic(df_information_schema)
         vn.train(plan=plan)
         _vanna_instance = vn
+
     return _vanna_instance
+
 
 def run_sql(sql: str, sql_client: IMSQueryHandler, db: str) -> pd.DataFrame:
     """Execute SQL query using the IMS Query Handler."""
     sql_client = get_ims_handler_from_env()
     return sql_client.query(query=sql, database=db)
 
+
 def image_to_base64(input_path: str):
     with open(input_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
-    
+
+
 def get_image_embedding(input_path: str):
     with open(input_path, "rb") as image_file:
-        response = embedding(model="cohere/embed-english-v3.0", input=[image_to_base64(input_path)])
+        response = embedding(
+            model="cohere/embed-english-v3.0", input=[image_to_base64(input_path)]
+        )
 
     return response.data[0]["embedding"]
 
-def train_natural_language_to_sql() -> VannaDefault:
-    vanna_model_name = 'contech1'    
-    vn = VannaDefault(model=vanna_model_name, api_key='9bb6772c72cf4cc6922aa7106a5789f9')
+
+def train_natural_language_to_sql() -> VannaInstance:
+    vn = get_vanna_instance()
+
     sql_client = get_ims_handler_from_env()
 
     vn.run_sql = run_sql
     vn.run_sql_is_set = True
-    
-    df_information_schema = vn.run_sql("SELECT * FROM INFORMATION_SCHEMA.COLUMNS",sql_client=sql_client, db='dob_bis')
+
+    df_information_schema = vn.run_sql(
+        "SELECT * FROM INFORMATION_SCHEMA.COLUMNS", sql_client=sql_client, db="dob_bis"
+    )
     plan = vn.get_training_plan_generic(df_information_schema)
     vn.train(plan=plan)
     return vn
 
+
 def execute_natural_language_to_sql(prompt: str) -> pd.DataFrame:
-    vanna_model_name = 'contech1'    
-    vn = VannaDefault(model=vanna_model_name, api_key='9bb6772c72cf4cc6922aa7106a5789f9')
+    vn = get_vanna_instance()
+
     if vn.get_training_data().empty:
         vn = train_natural_language_to_sql()
+
     sql_client = get_ims_handler_from_env()
     sql = vn.generate_sql(prompt)
-    
+
     vn.run_sql = run_sql
     vn.run_sql_is_set = True
-    
-    result = vn.run_sql(sql,sql_client=sql_client, db='dob_bis')
+
+    result = vn.run_sql(sql, sql_client=sql_client, db="dob_bis")
     return result
+
 
 # Mock functions for demonstration
 async def decompose_question(state: State, config: RunnableConfig) -> Dict:
@@ -118,15 +147,16 @@ async def decompose_question(state: State, config: RunnableConfig) -> Dict:
         latest_message = state.messages[-1]  # Save the latest human message
         state.reset()
         state.messages = [latest_message]  # Restore the latest human message
-        
+
     if not state.is_decomposition_done:
         configuration = Configuration.from_runnable_config(config)
         model = load_chat_model(configuration.model)
-        
+
         main_question = state.messages[0].content
-        
+
         # Create a system prompt for question decomposition
-        system_message = SystemMessage(content="""You are an expert at breaking down complex construction-related questions into sequential, query-able sub-questions.
+        system_message = SystemMessage(
+            content="""You are an expert at breaking down complex construction-related questions into sequential, query-able sub-questions.
 
 You have access to two specific NYC building data sources:
 
@@ -161,18 +191,20 @@ For example, if asked "What are the trends in permit applications across differe
 However, a simple question like "How many active construction permits are there in Manhattan?" should output exactly:
 1. How many active construction permits are there in Manhattan?
 
-For questions about Certificates of Occupancy, remember you can only reference the 4 buildings in the vector store.""")
+For questions about Certificates of Occupancy, remember you can only reference the 4 buildings in the vector store."""
+        )
 
-        
         # Ask the model to decompose the question
         response = await model.ainvoke(
             [
                 system_message,
-                HumanMessage(content=f"Break down this question into sequential, query-able sub-questions: {main_question}")
+                HumanMessage(
+                    content=f"Break down this question into sequential, query-able sub-questions: {main_question}"
+                ),
             ],
-            config
+            config,
         )
-        
+
         # Extract sub-questions from the response
         # Assuming the model returns a numbered list, split on newlines and clean up
         sub_questions = [
@@ -180,88 +212,106 @@ For questions about Certificates of Occupancy, remember you can only reference t
             for q in response.content.split("\n")
             if q.strip() and any(c.isdigit() for c in q)
         ]
-        
+
         return {
             "sub_questions": sub_questions,
             "is_decomposition_done": True,
-            "messages": [AIMessage(content=f"I've broken this down into {len(sub_questions)} questions:\n" + "\n".join(f"{i+1}. {q}" for i, q in enumerate(sub_questions)))]
+            "messages": [
+                AIMessage(
+                    content=f"I've broken this down into {len(sub_questions)} questions:\n"
+                    + "\n".join(f"{i+1}. {q}" for i, q in enumerate(sub_questions))
+                )
+            ],
         }
     return {}
+
 
 async def query_execution(state: State, config: RunnableConfig) -> Dict:
     """Execute natural language queries using Vanna."""
     global _failed_queries
-    
+
     if not state.sub_questions:
         return {"all_questions_answered": True}
-        
+
     # Find next unanswered question, excluding globally failed queries
-    current_question = next((q for q in state.sub_questions if q not in state.answers and q not in _failed_queries), None)
-    
+    current_question = next(
+        (
+            q
+            for q in state.sub_questions
+            if q not in state.answers and q not in _failed_queries
+        ),
+        None,
+    )
+
     # If no more questions to answer
     if current_question is None:
         return {"all_questions_answered": True}
-    
+
     try:
         # Execute the query using Vanna singleton
         result = execute_natural_language_to_sql(current_question)
-        
+
         # Convert DataFrame to string representation for the answer
         answer = result.to_string() if not result.empty else "No results found"
-        
+
         # Update state with new answer
         new_answers = dict(state.answers)
         new_answers[current_question] = answer
-        
+
         # Check if this was the last question (including globally failed queries)
-        all_answered = len(new_answers) + len(_failed_queries) == len(state.sub_questions)
-        
+        all_answered = len(new_answers) + len(_failed_queries) == len(
+            state.sub_questions
+        )
+
         return {
             "answers": new_answers,
             "current_context": {"last_answered": current_question},
             "all_questions_answered": all_answered,
-            "messages": [AIMessage(content=f"Found answer for: {current_question}\n{answer}")]
+            "messages": [
+                AIMessage(content=f"Found answer for: {current_question}\n{answer}")
+            ],
         }
     except Exception as e:
         # Track failed query globally
         _failed_queries.add(current_question)
-        
+
         return {
-            "messages": [AIMessage(content=f"Failed to execute query for: {current_question}\nError: {str(e)}\nSkipping this question permanently.")]
+            "messages": [
+                AIMessage(
+                    content=f"Failed to execute query for: {current_question}\nError: {str(e)}\nSkipping this question permanently."
+                )
+            ]
         }
 
+
 def gather_query_context(query: str):
-  embedding_str = ','.join(str(v) for v in embedding(
-    model="cohere/embed-english-v3.0", 
-    input=[query]
-  ).data[0]["embedding"])
+    embedding_str = ",".join(
+        str(v)
+        for v in embedding(model="cohere/embed-english-v3.0", input=[query]).data[0][
+            "embedding"
+        ]
+    )
 
-  searches = {
-    "searches": [
-      {
-        "query_by": "content",
-        "q": query,
-        "exclude_fields": "embedding"
-      }
-    ]
-  }
+    searches = {
+        "searches": [{"query_by": "content", "q": query, "exclude_fields": "embedding"}]
+    }
 
-  search_parameters = {
-    "collection": "pdfs",
-    "vector_query": f"embedding:([{embedding_str}], alpha: 0.4, k: 4)",
-    "per_page": 25,
-  }
+    search_parameters = {
+        "collection": "pdfs",
+        "vector_query": f"embedding:([{embedding_str}], alpha: 0.4, k: 4)",
+        "per_page": 25,
+    }
 
-  results = get_typesense_client().multi_search.perform(searches, search_parameters)
-  print("RESULTS", results)
-  return results
+    results = get_typesense_client().multi_search.perform(searches, search_parameters)
+    # print("RESULTS", results)
+    return results
 
 
 def synthesize_query(query: str):
     # Get context
     context = gather_query_context(query)
     base64_images = []
-    
+
     # Get images from context
     for result in context["results"][0]["hits"]:
         image_base64 = image_to_base64(
@@ -275,108 +325,128 @@ def synthesize_query(query: str):
         model="openai/gpt-4o",
         # response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": "Attempt to answer the following query using the following images"},
+            {
+                "role": "system",
+                "content": "Attempt to answer the following query using the following images",
+            },
             {"role": "user", "content": f"Query: {query}"},
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
-                        }
-                    } for base64_image in base64_images
-                ]
-            }
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                    }
+                    for base64_image in base64_images
+                ],
+            },
         ],
     )
     return image_query_response.choices[0].message.content
+
 
 async def semantic_search_execution(state: State, config: RunnableConfig) -> Dict:
     """Execute semantic search queries in parallel with SQL queries."""
     if not state.sub_questions:
         return {"all_semantic_questions_answered": True}
-        
-    current_question = next((q for q in state.sub_questions if q not in state.semantic_answers), None)
-    
+
+    current_question = next(
+        (q for q in state.sub_questions if q not in state.semantic_answers), None
+    )
+
     if current_question is None:
         return {"all_semantic_questions_answered": True}
-    
+
     try:
         # Use actual semantic search implementation
         semantic_answer = synthesize_query(current_question)
         print("SEMANTIC ANSWER", semantic_answer)
-        
+
         # Update semantic answers
         new_semantic_answers = dict(state.semantic_answers)
         new_semantic_answers[current_question] = semantic_answer
-        
+
         # Check if this was the last question
         all_answered = len(new_semantic_answers) == len(state.sub_questions)
-        
+
         # Update semantic context
         new_semantic_context = dict(state.semantic_context)
         new_semantic_context["last_search"] = current_question
-        
+
         return {
             "semantic_answers": new_semantic_answers,
             "semantic_context": new_semantic_context,
             "all_semantic_questions_answered": all_answered,
-            "messages": [AIMessage(content=f"Found semantic search result for: {current_question}\n{semantic_answer}")]
+            "messages": [
+                AIMessage(
+                    content=f"Found semantic search result for: {current_question}\n{semantic_answer}"
+                )
+            ],
         }
     except Exception as e:
         return {
-            "messages": [AIMessage(content=f"Failed semantic search for: {current_question}\nError: {str(e)}")]
+            "messages": [
+                AIMessage(
+                    content=f"Failed semantic search for: {current_question}\nError: {str(e)}"
+                )
+            ]
         }
+
 
 async def synthesize_answers(state: State, config: RunnableConfig) -> Dict:
     """Synthesize all answers into a final response that directly addresses the original question."""
     try:
         print("ANSWERS", state)
         if state.all_questions_answered and state.all_semantic_questions_answered:
-            print(state.semantic_answers)
+            print("state.semantic_answers:", state.semantic_answers)
             configuration = Configuration.from_runnable_config(config)
             model = load_chat_model(configuration.model)
-            
+
             original_question = state.messages[0].content
-            
+
             context = "Here are the results from our analysis:\n\n"
-            
+
             # Include both SQL query results and semantic search results
             for question in state.sub_questions:
                 context += f"Question: {question}\n"
                 if question in state.answers:
                     context += f"SQL Query Result: {state.answers[question]}\n"
                 if question in state.semantic_answers:
-                    context += f"Semantic Search Result: {state.semantic_answers[question]}\n"
+                    context += (
+                        f"Semantic Search Result: {state.semantic_answers[question]}\n"
+                    )
                 context += "\n"
-                
-            system_message = SystemMessage(content="""You are an expert at synthesizing information to answer questions about construction and building data.
+
+            system_message = SystemMessage(
+                content="""You are an expert at synthesizing information to answer questions about construction and building data.
 Your task is to:
 1. Review the original question and available answers from both SQL queries and semantic search
 2. Determine if the information is sufficient and relevant to answer the original question
 3. If the information is insufficient or irrelevant, clearly state that an answer cannot be generated
 4. If the information is useful, provide a clear, concise synthesis that directly answers the original question
-5. Only include relevant information in your response""")
-            
+5. Only include relevant information in your response"""
+            )
+
             try:
                 response = await model.ainvoke(
                     [
                         system_message,
-                        HumanMessage(content=f"""Original Question: {original_question}
+                        HumanMessage(
+                            content=f"""Original Question: {original_question}
 
 Available Information:
 {context}
 
-Please synthesize this information to answer the original question, or indicate if an answer cannot be generated.""")
+Please synthesize this information to answer the original question, or indicate if an answer cannot be generated."""
+                        ),
                     ],
-                    config
+                    config,
                 )
             except Exception as e:
                 return {
                     "messages": [AIMessage(content=f"Error during synthesis: {str(e)}")]
                 }
-            
+
             # Reset flags and state for next question
             return {
                 "messages": [AIMessage(content=response.content)],
@@ -387,13 +457,22 @@ Please synthesize this information to answer the original question, or indicate 
                 "answers": {},
                 "semantic_answers": {},
                 "sql_context": {},
-                "semantic_context": {}
+                "semantic_context": {},
             }
     except Exception as e:
         return {
-            "messages": [AIMessage(content=f"Unexpected error during synthesis: {str(e)}")]
+            "messages": [
+                AIMessage(content=f"Unexpected error during synthesis: {str(e)}")
+            ]
         }
-    return {"messages": [AIMessage(content="Still gathering information from queries and semantic search...")]}
+    return {
+        "messages": [
+            AIMessage(
+                content="Still gathering information from queries and semantic search..."
+            )
+        ]
+    }
+
 
 # Define the function that calls the model
 
@@ -460,6 +539,7 @@ builder.add_node("tools", ToolNode(TOOLS))
 # Set the entrypoint
 builder.add_edge("__start__", "decompose")
 
+
 def route_decomposition(state: State) -> List[str]:
     """Route after question decomposition."""
     if state.is_decomposition_done:
@@ -467,11 +547,13 @@ def route_decomposition(state: State) -> List[str]:
         return ["execute_query", "semantic_search"]
     return ["call_model"]
 
+
 def route_execution(state: State) -> Literal["synthesize", "execute_query"]:
     """Route after query execution."""
     if state.all_questions_answered:
         return "synthesize"
     return "execute_query"
+
 
 def route_semantic_search(state: State) -> Literal["synthesize", "semantic_search"]:
     """Route after semantic search."""
@@ -479,9 +561,11 @@ def route_semantic_search(state: State) -> Literal["synthesize", "semantic_searc
         return "synthesize"
     return "semantic_search"
 
+
 def route_synthesis(state: State) -> Literal["__end__"]:
     """Route after synthesis."""
     return "__end__"
+
 
 def route_model_output(state: State) -> Literal["__end__", "tools"]:
     """Route after model output."""
@@ -489,24 +573,23 @@ def route_model_output(state: State) -> Literal["__end__", "tools"]:
         return "__end__"
     return "tools"
 
+
 # Add conditional edges for branching logic
 builder.add_conditional_edges(
-    "decompose",
-    route_decomposition,
-    ["execute_query", "semantic_search", "call_model"]
+    "decompose", route_decomposition, ["execute_query", "semantic_search", "call_model"]
 )
 
 # Add recursive edges for execution nodes
 builder.add_conditional_edges(
     "execute_query",
     route_execution,
-    {"synthesize": "synthesize", "execute_query": "execute_query"}
+    {"synthesize": "synthesize", "execute_query": "execute_query"},
 )
 
 builder.add_conditional_edges(
     "semantic_search",
     route_semantic_search,
-    {"synthesize": "synthesize", "semantic_search": "semantic_search"}
+    {"synthesize": "synthesize", "semantic_search": "semantic_search"},
 )
 
 # Add edge to end

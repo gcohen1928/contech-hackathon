@@ -1,0 +1,10 @@
+vanna[chromadb,openai,postgres]
+pandas
+typesense
+litellm
+langchain-core
+langchain-community
+langgraph
+chainlit
+iamauth
+awswrangler
