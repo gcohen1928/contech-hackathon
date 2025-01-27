@@ -1,14 +1,9 @@
 import { CornerDownLeft } from "lucide-react";
 import { Button } from "./ui/button";
-import {
-  ChatBubble,
-  ChatBubbleAvatar,
-  ChatBubbleMessage,
-} from "./ui/chat/chat-bubble";
+import { ChatBubble, ChatBubbleMessage } from "./ui/chat/chat-bubble";
 import { ChatInput } from "./ui/chat/chat-input";
 import { ChatMessageList } from "./ui/chat/chat-message-list";
-import { useEffect, useState } from "react";
-import { useSelectedFile } from "@/state/selectedFile";
+import { useState } from "react";
 import ContextSelector from "./ContextSelector";
 import { MessageRole, sendChatMessage } from "@/clients/chatAPI";
 import { useMessagesStore } from "@/state/messages";
@@ -22,23 +17,7 @@ interface Message {
 const ChatTextbox = () => {
   const [content, setContent] = useState("");
 
-  // const { filePath } = useSelectedFile();
   const { messages, addMessage, setLoading } = useMessagesStore();
-  // const { addMessage, setLoading } = useMessagesStore((state) => ({
-  //   addMessage: state.addMessage,
-  //   setLoading: state.setLoading,
-  // }));
-
-  // useEffect(() => {
-  //   if (filePath && messages.length === 0) {
-  //     console.log("adding help message");
-  //     addMessage({
-  //       id: "1",
-  //       content: "How can I help you with this file?",
-  //       role: "assistant",
-  //     });
-  //   }
-  // }, [filePath, messages]);
 
   const handleSendMessage = async (content: string) => {
     setContent("");
@@ -123,9 +102,6 @@ const Chat = () => {
                     key={message.id}
                     variant={message.role === "user" ? "sent" : "received"}
                   >
-                    {/* <ChatBubbleAvatar
-                      fallback={message.role === "user" ? "US" : "AI"}
-                    /> */}
                     <ChatBubbleMessage
                       variant={message.role === "user" ? "sent" : "received"}
                       isLoading={message.id === "loading"}

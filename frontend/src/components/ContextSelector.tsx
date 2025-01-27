@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/popover";
 import { useEffect, useState } from "react";
 import { DATABASES, DOCUMENTS, useSelectedFile } from "@/state/selectedFile";
+import { useMessagesStore } from "@/state/messages";
 
 interface ContextOption {
   value: string;

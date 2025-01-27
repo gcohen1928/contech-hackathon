@@ -18,6 +18,7 @@ import {
   SidebarMenuSubItem,
 } from "@/components/ui/sidebar";
 import { useSelectedFile } from "@/state/selectedFile";
+import { useMessagesStore } from "@/state/messages";
 
 interface DocumentItem {
   title: string;
@@ -29,6 +30,20 @@ interface DocumentItem {
 
 const NavDocumentSubItem = ({ item }: { item: DocumentItem }) => {
   const { setSelectedFile } = useSelectedFile();
+  const { messages, addMessage } = useMessagesStore();
+
+  const handleSelectFile = (filepath: string) => {
+    setSelectedFile(filepath);
+
+    if (messages.length === 0) {
+      console.log("adding help message");
+      addMessage({
+        id: "1",
+        content: "How can I help you with this document?",
+        role: "assistant",
+      });
+    }
+  };
 
   return (
     <SidebarMenuSubItem>
@@ -52,7 +67,10 @@ const NavDocumentSubItem = ({ item }: { item: DocumentItem }) => {
           </div>
         </Collapsible>
       ) : (
-        <SidebarMenuSubButton asChild onClick={() => setSelectedFile(item.url)}>
+        <SidebarMenuSubButton
+          asChild
+          onClick={() => handleSelectFile(item.url)}
+        >
           <div>
             {item.icon && <item.icon />}
             <span>{item.title}</span>
