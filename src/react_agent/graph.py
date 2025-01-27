@@ -154,6 +154,8 @@ async def decompose_question(state: State, config: RunnableConfig) -> Dict:
 
         main_question = state.messages[0].content
 
+        # TODO: restrict prompt depending on allowed context
+
         # Create a system prompt for question decomposition
         system_message = SystemMessage(
             content="""You are an expert at breaking down complex construction-related questions into sequential, query-able sub-questions.
@@ -373,6 +375,8 @@ async def semantic_search_execution(state: State, config: RunnableConfig) -> Dic
         new_semantic_context = dict(state.semantic_context)
         new_semantic_context["last_search"] = current_question
 
+        # TODO: include cited sources in state
+
         return {
             "semantic_answers": new_semantic_answers,
             "semantic_context": new_semantic_context,
@@ -544,6 +548,7 @@ def route_decomposition(state: State) -> List[str]:
     """Route after question decomposition."""
     if state.is_decomposition_done:
         # Fan out to both query execution and semantic search
+        # TODO: fan out to selected tools only
         return ["execute_query", "semantic_search"]
     return ["call_model"]
 

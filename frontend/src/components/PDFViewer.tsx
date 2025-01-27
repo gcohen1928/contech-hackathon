@@ -25,8 +25,6 @@ const PDFViewer = () => {
 
   const { filePath } = useSelectedFile();
 
-  console.log(filePath);
-
   const onDocumentLoadSuccess = useCallback(
     ({ numPages }: { numPages: number }): void => {
       setNumPages(numPages);

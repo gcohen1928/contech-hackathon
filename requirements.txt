@@ -8,3 +8,4 @@ langgraph
 chainlit
 iamauth
 awswrangler
+fastapi[standard]
