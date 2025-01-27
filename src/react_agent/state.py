@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence, Self
+import operator
+from typing import List, Optional, Sequence, Self
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
 from langgraph.managed import IsLastStep
 from typing_extensions import Annotated
+
+
+CONTEXT_IDS = [
+    "data/Certificates of Occupancy/161 W. 56th Street/M000093215.PDF",
+    "data/Certificates of Occupancy/161 W. 56th Street/M00093381B.PDF",
+    "data/Certificates of Occupancy/161 W. 56th Street/M000093520.PDF",
+    "data/Certificates of Occupancy/152 W. 57th Street/M00103924B.PDF",
+    "databases/job_filings",
+    "databases/complaints",
+    "databases/violations",
+]
 
 
 @dataclass
@@ -37,6 +49,9 @@ class InputState:
     updating by ID to maintain an "append-only" state unless a message with the same ID is provided.
     """
 
+    allowed_context: List[str] = field(default_factory=list)
+    """List of allowed context for the agent to use"""
+
 
 @dataclass
 class State(InputState):
@@ -53,33 +68,53 @@ class State(InputState):
     It is set to 'True' when the step count reaches recursion_limit - 1.
     """
 
-    sub_questions: list[str] = field(default_factory=list)
-    """List of decomposed questions that need to be answered"""
-    
-    answers: dict[str, str] = field(default_factory=dict)
-    """Dictionary mapping questions to their SQL query answers"""
-    
-    semantic_answers: dict[str, str] = field(default_factory=dict)
-    """Dictionary mapping questions to their semantic search answers"""
-    
-    sql_context: dict = field(default_factory=dict)
-    """Context for SQL query execution"""
-    
+    # TODO: track count of recursive rounds
+
+    question: Optional[str] = field(default=None)
+    """The current question being asked of the agent"""
+
+    reply: Optional[str] = field(default=None)
+    """The current reply from the agent"""
+
+    selected_tools: List[str] = field(default_factory=list)
+    """List of tools selected by the agent"""
+
+    sql_sub_questions: List[str] = field(default_factory=list)
+    """List of SQL sub-questions to answer"""
+
+    current_sql_sub_question: Optional[str] = field(default=None)
+    """The current SQL sub-question being answered"""
+
+    sql_answers: Annotated[List[str], operator.add] = field(default_factory=list)
+    """List of SQL answers"""
+
+    semantic_sub_questions: List[str] = field(default_factory=list)
+    """List of semantic sub-questions to answer"""
+
+    current_semantic_sub_question: Optional[str] = field(default=None)
+    """The current semantic sub-question being answered"""
+
+    semantic_answers: Annotated[List[str], operator.add] = field(default_factory=list)
+    """List of semantic answers"""
+
+    user_question: Optional[str] = field(default=None)
+    """The current user question being asked of the agent"""
+
     semantic_context: dict = field(default_factory=dict)
     """Context for semantic search execution"""
-    
+
     is_decomposition_done: bool = field(default=False)
     """Flag indicating if question decomposition is complete"""
-    
+
     all_questions_answered: bool = field(default=False)
     """Flag indicating if all SQL sub-questions have been answered"""
-    
+
     all_semantic_questions_answered: bool = field(default=False)
     """Flag indicating if all semantic search sub-questions have been answered"""
 
     def reset(self) -> Self:
         """Reset all mutable state fields to their default values.
-        
+
         Returns:
             Self: The state instance with reset values
         """
@@ -87,8 +122,7 @@ class State(InputState):
         self.sub_questions = []
         self.answers = {}
         self.semantic_answers = {}
-        self.sql_context = {}
-        self.semantic_context = {}
+
         self.is_decomposition_done = False
         self.all_questions_answered = False
         self.all_semantic_questions_answered = False

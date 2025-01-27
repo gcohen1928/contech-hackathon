@@ -10,14 +10,15 @@ interface ChatResponse {
 }
 
 export const sendChatMessage = async (
-  messages: Message[]
+  messages: Message[],
+  context: string[]
 ): Promise<ChatResponse> => {
   const response = await fetch("http://localhost:8000/chat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, allowed_context: context }),
   });
 
   if (!response.ok) {

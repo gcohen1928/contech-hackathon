@@ -32,6 +32,7 @@ class Message(BaseModel):
 
 class ChatPayload(BaseModel):
     messages: List[Message]
+    allowed_context: List[str]
 
 
 @app.post("/chat")
@@ -49,9 +50,19 @@ async def chat(payload: ChatPayload):
     ]
 
     try:
-        final_state = await graph.ainvoke({"messages": messages})
+        final_state = await graph.ainvoke(
+            {"messages": messages, "allowed_context": payload.allowed_context}
+        )
     except Exception as e:
         print("Error during graph invocation:", e)
         return {"message": "Sorry, I'm having trouble answering that question."}
 
-    return {"message": final_state["messages"][-1].content}
+    final_msg = []
+
+    if final_state["reply"] is not None:
+        final_msg.append(final_state["reply"])
+
+    if final_state["user_question"] is not None:
+        final_msg.append(final_state["user_question"])
+
+    return {"message": "\n\n".join(final_msg)}

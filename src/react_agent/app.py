@@ -24,7 +24,7 @@ async def main(message: cl.Message):
         return
 
     print("final_state:", final_state)
-    await response_msg.stream_token(final_state["messages"][-1].content)
+    await response_msg.stream_token(final_state["reply"])
 
     # Send a response back to the user
     # await cl.Message(

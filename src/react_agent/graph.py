@@ -4,9 +4,10 @@ Works with a chat model with tool calling support.
 """
 
 from datetime import datetime, timezone
-import os
 from typing import Dict, List, Literal, cast, Union, Set, Annotated
+import os
 import base64
+import json
 
 import pandas as pd
 
@@ -16,10 +17,11 @@ from vanna.openai import OpenAI_Chat
 from vanna.chromadb import ChromaDB_VectorStore
 from react_agent.gryps_utils import get_ims_handler_from_env, IMSQueryHandler
 
-from litellm import embedding, completion
+from litellm import acompletion, embedding, completion
 import typesense
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import Send
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
@@ -139,115 +141,249 @@ def execute_natural_language_to_sql(prompt: str) -> pd.DataFrame:
     return result
 
 
+async def extract_question(state: State, config: RunnableConfig) -> State:
+    """Extract the question from the state."""
+    extract_question_response = await acompletion(
+        model="gpt-4o",
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": "Distill the user's input to one, consice question",
+            },
+            # {
+            #     "role": "system",
+            #     "content": "If there is no question or the question is not related to NYC building and construction data, reply to the user's input",
+            # },
+            {
+                "role": "system",
+                "content": "Return the question in a JSON object with a 'question' key and a 'reply' key if there is no question",
+            },
+            {
+                "role": "user",
+                "content": "Here are the last messages in the conversation:",
+            },
+        ]
+        + [
+            {"role": "user", "content": f"{msg.type}: {msg.content}"}
+            for msg in state.messages[-8:]
+        ],
+    )
+
+    json_response = json.loads(extract_question_response.choices[0].message.content)
+    print("Extract Question Response:", json_response)
+
+    return {
+        "question": json_response.get("question"),
+        "reply": json_response.get("reply"),
+    }
+
+
 # Mock functions for demonstration
-async def decompose_question(state: State, config: RunnableConfig) -> Dict:
+async def plan_question(state: State, config: RunnableConfig) -> Dict:
     """Function to decompose the main question into sequential, query-able sub-questions."""
     # Reset state if this is a new question (detected by checking if the last message is from human)
-    if state.messages and isinstance(state.messages[-1], HumanMessage):
-        latest_message = state.messages[-1]  # Save the latest human message
-        state.reset()
-        state.messages = [latest_message]  # Restore the latest human message
+    # TODO: retrieve question from state
+    # if state.messages and isinstance(state.messages[-1], HumanMessage):
+    #     latest_message = state.messages[-1]  # Save the latest human message
+    #     state.reset()
+    #     state.messages = [latest_message]  # Restore the latest human message
 
-    if not state.is_decomposition_done:
-        configuration = Configuration.from_runnable_config(config)
-        model = load_chat_model(configuration.model)
+    print("ALLOWED CONTEXT", state.allowed_context)
+    # configuration = Configuration.from_runnable_config(config)
+    # model = load_chat_model(configuration.model)
 
-        main_question = state.messages[0].content
+    main_question = state.question
 
-        # TODO: restrict prompt depending on allowed context
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an expert at breaking down complex construction-related questions into sequential, query-able sub-questions.",
+        },
+        {
+            "role": "system",
+            "content": "You have access to the following NYC building data sources:",
+        },
+    ]
 
-        # Create a system prompt for question decomposition
-        system_message = SystemMessage(
-            content="""You are an expert at breaking down complex construction-related questions into sequential, query-able sub-questions.
+    all_context_str = " ".join(state.allowed_context)
+    possible_context = []
 
-You have access to two specific NYC building data sources:
-
-1. Vector Store containing Certificate of Occupancy (CO) PDFs for 4 specific NYC buildings
-   - These COs contain official occupancy information and building details
-   - Limited to only 4 buildings' CO documentation
-
-2. Department of Buildings (DoB) BIS Database containing:
-   - Building complaints
-   - Violations
-   - Job filing documents
-   - Zoning documents
-   - Virtual jobs
-   - Other structured building-related data
-
-Each sub-question should:
-1. Be self-contained and answerable with a single SQL query or vector store search
-2. Build on previous questions' answers when needed
-3. Be ordered logically where later questions may depend on earlier answers
-4. Use precise language
-5. Use as few questions as possible - if the original question can be answered with a single query, do not break it down further
-6. Never break down into more than 3 sub-questions
-7. Only reference information available in the two data sources
-8. Only output the numbered questions, nothing else
-9. Make sure that you don't give ANY directions or ask for any addresses
-                                       10. JUST output short questions
-
-For example, if asked "What are the trends in permit applications across different boroughs and building types?", you would output exactly:
-1. What is the distribution of permit applications by borough and building type over time?
-2. What are the month-over-month changes in application volume?
-
-However, a simple question like "How many active construction permits are there in Manhattan?" should output exactly:
-1. How many active construction permits are there in Manhattan?
-
-For questions about Certificates of Occupancy, remember you can only reference the 4 buildings in the vector store."""
+    if "data/Certificates of Occupancy" in all_context_str:
+        messages.append(
+            {
+                "role": "system",
+                "content": "1. Vector Store containing Certificate of Occupancy (CO) PDFs for 4 specific NYC buildings (VECTOR_STORE) \n"
+                "- These COs contain official occupancy information and building details\n"
+                "- Limited to only 4 buildings' CO documentation",
+            }
         )
+        possible_context.append("VECTOR_STORE")
 
-        # Ask the model to decompose the question
-        response = await model.ainvoke(
-            [
-                system_message,
-                HumanMessage(
-                    content=f"Break down this question into sequential, query-able sub-questions: {main_question}"
-                ),
-            ],
-            config,
+    if "databases/" in all_context_str:
+        messages.append(
+            {
+                "role": "system",
+                "content": "2. Department of Buildings (DoB) BIS Database (SQL_DATABASE) containing: \n"
+                "- Job filing documents\n"
+                "- Zoning documents\n"
+                "- Virtual jobs\n"
+                "- Other structured building-related data",
+            }
         )
+        possible_context.append("SQL_DATABASE")
 
-        # Extract sub-questions from the response
-        # Assuming the model returns a numbered list, split on newlines and clean up
-        sub_questions = [
-            q.strip().split(". ", 1)[1] if ". " in q.strip() else q.strip()
-            for q in response.content.split("\n")
-            if q.strip() and any(c.isdigit() for c in q)
+    messages.extend(
+        [
+            {
+                "role": "system",
+                "content": f"Determine which data sources you will use to answer the question: {main_question}",
+            },
+            {
+                "role": "system",
+                "content": "Return the data sources you will use to answer the question in a JSON object"
+                f"with a 'data_sources' key containing a list of possible values: {", ".join(possible_context)}",
+            },
+            {
+                "role": "system",
+                "content": "Example: {'data_sources': ['VECTOR_STORE', 'SQL_DATABASE']}",
+            },
         ]
+    )
 
-        return {
-            "sub_questions": sub_questions,
-            "is_decomposition_done": True,
-            "messages": [
-                AIMessage(
-                    content=f"I've broken this down into {len(sub_questions)} questions:\n"
-                    + "\n".join(f"{i+1}. {q}" for i, q in enumerate(sub_questions))
-                )
-            ],
-        }
-    return {}
+    # TODO: restrict prompt depending on allowed context
+    query_routing_response = await acompletion(
+        model="gpt-4o",
+        response_format={"type": "json_object"},
+        messages=messages,
+    )
+
+    json_response = json.loads(query_routing_response.choices[0].message.content)
+    print("Query Routing Response:", json_response)
+
+    return {
+        "selected_tools": json_response.get("data_sources", []),
+    }
+
+
+async def determine_sql_subquestions(state: State, config: RunnableConfig) -> Dict:
+    """Determine the SQL subquestions to answer."""
+    available_databases = [
+        ctx.replace("databases/", "")
+        for ctx in state.allowed_context
+        if "databases/" in ctx
+    ]
+
+    sql_subquestions_response = await acompletion(
+        model="gpt-4o",
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": "You are creating subqueries to answer a question about construction data using a SQL database",
+            },
+            {
+                "role": "system",
+                "content": "Each query should build on previous questions' answers when needed",
+            },
+            {"role": "system", "content": "Do not break down into more than 3 queries"},
+            {
+                "role": "system",
+                "content": f"Your database has access to the following tables: {", ".join(available_databases)}",
+            },
+            {"role": "user", "content": "Question: " + state.question},
+            {
+                "role": "user",
+                "content": "Return the sub-questions in a JSON object with a 'sub_questions' key containing a list of sub-questions",
+            },
+            {
+                "role": "user",
+                "content": "Example: {'sub_questions': ['What is the total number of permits issued in Manhattan?', 'What is the average permit value in Manhattan?']}",
+            },
+        ],
+    )
+
+    json_response = json.loads(sql_subquestions_response.choices[0].message.content)
+    print("SQL Subquestions Response:", json_response)
+
+    # replace sub_questions
+    # state.sql_sub_questions = json_response.get("sub_questions", [])
+    state.sql_sub_questions.clear()
+    return {
+        "sql_sub_questions": json_response.get("sub_questions", []),
+    }
+
+
+async def determine_semantic_subquestions(state: State, config: RunnableConfig) -> Dict:
+    """Determine the semantic subquestions to answer."""
+    available_documents = [
+        ctx.replace("data/Certificates of Occupancy", "")
+        for ctx in state.allowed_context
+        if "data/Certificates of Occupancy" in ctx
+    ]
+
+    sql_subquestions_response = await acompletion(
+        model="gpt-4o",
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": "You are creating subqueries to answer a question about construction data using a vector store",
+            },
+            {
+                "role": "system",
+                "content": "Each query should build on previous questions' answers when needed",
+            },
+            {"role": "system", "content": "Do not break down into more than 3 queries"},
+            {
+                "role": "system",
+                "content": f"Your vector store has access to the following documents: {", ".join(available_documents)}",
+            },
+            {"role": "user", "content": "Question: " + state.question},
+            {
+                "role": "user",
+                "content": "Return the sub-questions in a JSON object with a 'sub_questions' key containing a list of sub-questions",
+            },
+            {
+                "role": "user",
+                "content": "Example: {'sub_questions': ['What is the total number of permits issued in Manhattan?', 'What is the average permit value in Manhattan?']}",
+            },
+        ],
+    )
+
+    json_response = json.loads(sql_subquestions_response.choices[0].message.content)
+    print("Semantic Subquestions Response:", json_response)
+
+    # Replace sub_questions
+    # state.semantic_sub_questions = json_response.get("sub_questions", [])
+    state.semantic_sub_questions.clear()
+    return {
+        "semantic_sub_questions": json_response.get("sub_questions", []),
+    }
 
 
 async def query_execution(state: State, config: RunnableConfig) -> Dict:
     """Execute natural language queries using Vanna."""
     global _failed_queries
 
-    if not state.sub_questions:
-        return {"all_questions_answered": True}
+    # if not state.sql_sub_questions:
+    #     return {"all_questions_answered": True}
 
     # Find next unanswered question, excluding globally failed queries
-    current_question = next(
-        (
-            q
-            for q in state.sub_questions
-            if q not in state.answers and q not in _failed_queries
-        ),
-        None,
-    )
+    # current_question = next(
+    #     (
+    #         q
+    #         for q in state.sub_questions
+    #         if q not in state.answers and q not in _failed_queries
+    #     ),
+    #     None,
+    # )
+    current_question = state["current_sql_sub_question"]
 
     # If no more questions to answer
-    if current_question is None:
-        return {"all_questions_answered": True}
+    # if current_question is None:
+    #     return {"all_questions_answered": True}
+    print("CURRENT QUESTION", current_question)
 
     try:
         # Execute the query using Vanna singleton
@@ -255,24 +391,33 @@ async def query_execution(state: State, config: RunnableConfig) -> Dict:
 
         # Convert DataFrame to string representation for the answer
         answer = result.to_string() if not result.empty else "No results found"
+        print("SQL ANSWER", f"{current_question}: {answer}")
+
+        # state.sql_answers.append(f"{current_question}: {answer}")
+        return {
+            "sql_answers": [f"{current_question}: {answer}"],
+        }
+        # return {
+        #     "sql_answers": [f"{current_question}: {answer}"],
+        # }
 
         # Update state with new answer
-        new_answers = dict(state.answers)
-        new_answers[current_question] = answer
+        # new_answers = dict(state.answers)
+        # new_answers[current_question] = answer
 
-        # Check if this was the last question (including globally failed queries)
-        all_answered = len(new_answers) + len(_failed_queries) == len(
-            state.sub_questions
-        )
+        # # Check if this was the last question (including globally failed queries)
+        # all_answered = len(new_answers) + len(_failed_queries) == len(
+        #     state.sub_questions
+        # )
 
-        return {
-            "answers": new_answers,
-            "current_context": {"last_answered": current_question},
-            "all_questions_answered": all_answered,
-            "messages": [
-                AIMessage(content=f"Found answer for: {current_question}\n{answer}")
-            ],
-        }
+        # return {
+        #     "answers": new_answers,
+        #     "current_context": {"last_answered": current_question},
+        #     "all_questions_answered": all_answered,
+        #     "messages": [
+        #         AIMessage(content=f"Found answer for: {current_question}\n{answer}")
+        #     ],
+        # }
     except Exception as e:
         # Track failed query globally
         _failed_queries.add(current_question)
@@ -309,7 +454,7 @@ def gather_query_context(query: str):
     return results
 
 
-def synthesize_query(query: str):
+async def synthesize_query(query: str):
     # Get context
     context = gather_query_context(query)
     base64_images = []
@@ -323,7 +468,7 @@ def synthesize_query(query: str):
         base64_images.append(image_base64)
 
     # Respond to query using images
-    image_query_response = completion(
+    image_query_response = await acompletion(
         model="openai/gpt-4o",
         # response_format={"type": "json_object"},
         messages=[
@@ -349,44 +494,49 @@ def synthesize_query(query: str):
 
 async def semantic_search_execution(state: State, config: RunnableConfig) -> Dict:
     """Execute semantic search queries in parallel with SQL queries."""
-    if not state.sub_questions:
-        return {"all_semantic_questions_answered": True}
+    # if not state.sub_questions:
+    #     return {"all_semantic_questions_answered": True}
 
-    current_question = next(
-        (q for q in state.sub_questions if q not in state.semantic_answers), None
-    )
+    # current_question = next(
+    #     (q for q in state.sub_questions if q not in state.semantic_answers), None
+    # )
 
-    if current_question is None:
-        return {"all_semantic_questions_answered": True}
+    # if current_question is None:
+    #     return {"all_semantic_questions_answered": True}
+    current_question = state["current_semantic_sub_question"]
 
     try:
         # Use actual semantic search implementation
-        semantic_answer = synthesize_query(current_question)
-        print("SEMANTIC ANSWER", semantic_answer)
-
-        # Update semantic answers
-        new_semantic_answers = dict(state.semantic_answers)
-        new_semantic_answers[current_question] = semantic_answer
-
-        # Check if this was the last question
-        all_answered = len(new_semantic_answers) == len(state.sub_questions)
-
-        # Update semantic context
-        new_semantic_context = dict(state.semantic_context)
-        new_semantic_context["last_search"] = current_question
-
-        # TODO: include cited sources in state
+        semantic_answer = await synthesize_query(current_question)
+        print("SEMANTIC ANSWER", f"{current_question}: {semantic_answer}")
 
         return {
-            "semantic_answers": new_semantic_answers,
-            "semantic_context": new_semantic_context,
-            "all_semantic_questions_answered": all_answered,
-            "messages": [
-                AIMessage(
-                    content=f"Found semantic search result for: {current_question}\n{semantic_answer}"
-                )
-            ],
+            "semantic_answers": [f"{current_question}: {semantic_answer}"],
         }
+
+        # Update semantic answers
+        # new_semantic_answers = dict(state.semantic_answers)
+        # new_semantic_answers[current_question] = semantic_answer
+
+        # Check if this was the last question
+        # all_answered = len(new_semantic_answers) == len(state.sub_questions)
+
+        # # Update semantic context
+        # new_semantic_context = dict(state.semantic_context)
+        # new_semantic_context["last_search"] = current_question
+
+        # # TODO: include cited sources in state
+
+        # return {
+        #     "semantic_answers": new_semantic_answers,
+        #     "semantic_context": new_semantic_context,
+        #     "all_semantic_questions_answered": all_answered,
+        #     "messages": [
+        #         AIMessage(
+        #             content=f"Found semantic search result for: {current_question}\n{semantic_answer}"
+        #         )
+        #     ],
+        # }
     except Exception as e:
         return {
             "messages": [
@@ -399,88 +549,48 @@ async def semantic_search_execution(state: State, config: RunnableConfig) -> Dic
 
 async def synthesize_answers(state: State, config: RunnableConfig) -> Dict:
     """Synthesize all answers into a final response that directly addresses the original question."""
-    try:
-        print("ANSWERS", state)
-        if state.all_questions_answered and state.all_semantic_questions_answered:
-            print("state.semantic_answers:", state.semantic_answers)
-            configuration = Configuration.from_runnable_config(config)
-            model = load_chat_model(configuration.model)
+    print("SYNTHESIZE ANSWERS STATE", state)
 
-            original_question = state.messages[0].content
+    synthesize_answer_response = await acompletion(
+        model="gpt-4o",
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": "You are trying to answer the following question: "
+                + state.question,
+            },
+            {
+                "role": "system",
+                "content": "You have answers to the following questions:\n\n-"
+                + "\n- ".join(state.semantic_answers + state.sql_answers),
+            },
+            {
+                "role": "system",
+                "content": "Determine if the information is sufficient and relevant to answer the original question",
+            },
+            {
+                "role": "user",
+                "content": "If it is not sufficient or relevant, create a new question to ask the user or the model",
+            },
+            {
+                "role": "user",
+                "content": "Return the final answer in a JSON object with a 'reply' key containing either the final answer if there is sufficient information,"
+                "or a 'user_question' key containing follow-up questions to ask the user, or a 'model_question' to ask the model",
+            },
+        ],
+    )
 
-            context = "Here are the results from our analysis:\n\n"
+    json_response = json.loads(synthesize_answer_response.choices[0].message.content)
 
-            # Include both SQL query results and semantic search results
-            for question in state.sub_questions:
-                context += f"Question: {question}\n"
-                if question in state.answers:
-                    context += f"SQL Query Result: {state.answers[question]}\n"
-                if question in state.semantic_answers:
-                    context += (
-                        f"Semantic Search Result: {state.semantic_answers[question]}\n"
-                    )
-                context += "\n"
-
-            system_message = SystemMessage(
-                content="""You are an expert at synthesizing information to answer questions about construction and building data.
-Your task is to:
-1. Review the original question and available answers from both SQL queries and semantic search
-2. Determine if the information is sufficient and relevant to answer the original question
-3. If the information is insufficient or irrelevant, clearly state that an answer cannot be generated
-4. If the information is useful, provide a clear, concise synthesis that directly answers the original question
-5. Only include relevant information in your response"""
-            )
-
-            try:
-                response = await model.ainvoke(
-                    [
-                        system_message,
-                        HumanMessage(
-                            content=f"""Original Question: {original_question}
-
-Available Information:
-{context}
-
-Please synthesize this information to answer the original question, or indicate if an answer cannot be generated."""
-                        ),
-                    ],
-                    config,
-                )
-            except Exception as e:
-                return {
-                    "messages": [AIMessage(content=f"Error during synthesis: {str(e)}")]
-                }
-
-            # Reset flags and state for next question
-            return {
-                "messages": [AIMessage(content=response.content)],
-                "all_questions_answered": False,
-                "all_semantic_questions_answered": False,
-                "is_decomposition_done": False,
-                "sub_questions": [],
-                "answers": {},
-                "semantic_answers": {},
-                "sql_context": {},
-                "semantic_context": {},
-            }
-    except Exception as e:
-        return {
-            "messages": [
-                AIMessage(content=f"Unexpected error during synthesis: {str(e)}")
-            ]
-        }
     return {
-        "messages": [
-            AIMessage(
-                content="Still gathering information from queries and semantic search..."
-            )
-        ]
+        "reply": json_response.get("reply"),
+        "user_question": json_response.get("user_question"),
+        "question": json_response.get("model_question"),
     }
 
 
 # Define the function that calls the model
-
-
 async def call_model(
     state: State, config: RunnableConfig
 ) -> Dict[str, List[AIMessage]]:
@@ -533,7 +643,10 @@ async def call_model(
 builder = StateGraph(State, input=InputState, config_schema=Configuration)
 
 # Add nodes
-builder.add_node("decompose", decompose_question)
+builder.add_node("extract_question", extract_question)
+builder.add_node("plan", plan_question)
+builder.add_node("determine_sql_subquestions", determine_sql_subquestions)
+builder.add_node("determine_semantic_subquestions", determine_semantic_subquestions)
 builder.add_node("execute_query", query_execution)
 builder.add_node("semantic_search", semantic_search_execution)
 builder.add_node("synthesize", synthesize_answers)
@@ -541,34 +654,75 @@ builder.add_node("call_model", call_model)
 builder.add_node("tools", ToolNode(TOOLS))
 
 # Set the entrypoint
-builder.add_edge("__start__", "decompose")
+builder.add_edge("__start__", "extract_question")
+
+
+def route_question(state: State) -> Literal["__end__", "plan"]:
+    """If no question extracted and reply already exists, end the conversation."""
+    if (not state.question or state.question == "") and (
+        state.reply and state.reply != ""
+    ):
+        return "__end__"
+
+    return "plan"
 
 
 def route_decomposition(state: State) -> List[str]:
     """Route after question decomposition."""
-    if state.is_decomposition_done:
-        # Fan out to both query execution and semantic search
-        # TODO: fan out to selected tools only
-        return ["execute_query", "semantic_search"]
-    return ["call_model"]
+    # Fan out to both query execution and semantic search
+    routes = []
+
+    if "VECTOR_STORE" in state.selected_tools:
+        routes.append("determine_semantic_subquestions")
+
+    if "SQL_DATABASE" in state.selected_tools:
+        routes.append("determine_sql_subquestions")
+
+    if routes == []:
+        return ["synthesize"]
+
+    return routes
 
 
-def route_execution(state: State) -> Literal["synthesize", "execute_query"]:
-    """Route after query execution."""
-    if state.all_questions_answered:
-        return "synthesize"
-    return "execute_query"
+def route_sql_subqueries(state: State) -> List[str]:
+    print("SQL SUBQUESTIONS", state.sql_sub_questions)
+
+    return [
+        Send("execute_query", {"current_sql_sub_question": sq})
+        for sq in state.sql_sub_questions
+    ]
 
 
-def route_semantic_search(state: State) -> Literal["synthesize", "semantic_search"]:
-    """Route after semantic search."""
-    if state.all_semantic_questions_answered:
-        return "synthesize"
-    return "semantic_search"
+def route_semantic_subqueries(state: State) -> List[str]:
+    print("SEMANTIC SUBQUESTIONS", state.semantic_sub_questions)
+    return [
+        Send("semantic_search", {"current_semantic_sub_question": sq})
+        for sq in state.semantic_sub_questions
+    ]
 
 
-def route_synthesis(state: State) -> Literal["__end__"]:
+# def route_execution(state: State) -> Literal["synthesize", "execute_query"]:
+#     """Route after query execution."""
+#     if state.all_questions_answered:
+#         return "synthesize"
+#     return "execute_query"
+
+
+# def route_semantic_search(state: State) -> Literal["synthesize", "semantic_search"]:
+#     """Route after semantic search."""
+#     if state.all_semantic_questions_answered:
+#         return "synthesize"
+#     return "semantic_search"
+
+
+def route_synthesis(state: State) -> Literal["plan", "__end__"]:
     """Route after synthesis."""
+    print("ROUTE SYNTHESIS:", state)
+
+    # If still have a question, go back to plan
+    if state.question:
+        return "plan"
+
     return "__end__"
 
 
@@ -579,26 +733,58 @@ def route_model_output(state: State) -> Literal["__end__", "tools"]:
     return "tools"
 
 
+"""
+1. extract_question
+2. determine plan
+3a. If using a vector store, determine semantic subquestions
+3b. If using a SQL database, determine SQL subquestions
+4a. Execute semantic search for each subquestion
+4b. Execute SQL query for each subquestion
+5. Synthesize answers
+5. Check if all original question have been answered or if follow-up questions need to be asked to the user or to the model
+6. If follow-up questions can be asked to model, return to step 2.
+7. If original question has been answered or follow up questions need to be asked to user, return response.
+"""
+
 # Add conditional edges for branching logic
+builder.add_conditional_edges("extract_question", route_question, ["__end__", "plan"])
 builder.add_conditional_edges(
-    "decompose", route_decomposition, ["execute_query", "semantic_search", "call_model"]
+    "plan",
+    route_decomposition,
+    ["determine_semantic_subquestions", "determine_sql_subquestions", "call_model"],
 )
+
+builder.add_conditional_edges(
+    "determine_sql_subquestions",
+    route_sql_subqueries,
+    ["execute_query"],
+)
+
+builder.add_conditional_edges(
+    "determine_semantic_subquestions",
+    route_semantic_subqueries,
+    ["semantic_search"],
+)
+
+builder.add_edge("execute_query", "synthesize")
+builder.add_edge("semantic_search", "synthesize")
 
 # Add recursive edges for execution nodes
-builder.add_conditional_edges(
-    "execute_query",
-    route_execution,
-    {"synthesize": "synthesize", "execute_query": "execute_query"},
-)
+# builder.add_conditional_edges(
+#     "execute_query",
+#     route_execution,
+#     {"synthesize": "synthesize", "execute_query": "execute_query"},
+# )
 
-builder.add_conditional_edges(
-    "semantic_search",
-    route_semantic_search,
-    {"synthesize": "synthesize", "semantic_search": "semantic_search"},
-)
+# builder.add_conditional_edges(
+#     "semantic_search",
+#     route_semantic_search,
+#     {"synthesize": "synthesize", "semantic_search": "semantic_search"},
+# )
 
 # Add edge to end
-builder.add_edge("synthesize", "__end__")
+# builder.add_edge("synthesize", "__end__")
+builder.add_conditional_edges("synthesize", route_synthesis, ["plan", "__end__"])
 
 # Add regular edge for tools back to model
 builder.add_edge("tools", "call_model")

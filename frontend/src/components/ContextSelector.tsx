@@ -16,54 +16,18 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useEffect, useState } from "react";
-import { DATABASES, DOCUMENTS, useSelectedFile } from "@/state/selectedFile";
-import { useMessagesStore } from "@/state/messages";
-
-interface ContextOption {
-  value: string;
-  label: string;
-}
-
-const flattenNestedArray = <T extends { items?: T[] }>(
-  arr: T[],
-  transform: (item: T) => ContextOption
-): ContextOption[] => {
-  return arr.reduce<ContextOption[]>((acc, item) => {
-    if (item.items && item.items.length > 0) {
-      return [...acc, ...flattenNestedArray(item.items, transform)];
-    }
-    return [...acc, transform(item)];
-  }, []);
-};
-
-const transform = (item: any): ContextOption => ({
-  value: item.url,
-  label: item.title,
-});
-
-const flattenedDocuments = flattenNestedArray(DOCUMENTS, transform);
-
-const contextOptions: ContextOption[] = [
-  {
-    value: "all",
-    label: "All",
-  },
-  ...flattenedDocuments,
-  ...DATABASES.map((db) => ({
-    value: db.url,
-    label: db.name,
-  })),
-];
+import { useSelectedFile } from "@/state/selectedFile";
+import { ContextOptions, useContextStore } from "@/state/context";
 
 const ContextSelector = () => {
   const [open, setOpen] = useState(false);
-  const [selectedContexts, setSelectedContexts] = useState<ContextOption[]>([]);
 
   const { filePath } = useSelectedFile();
+  const { selectedContexts, setSelectedContexts } = useContextStore();
 
   useEffect(() => {
     if (filePath) {
-      const foundContext = contextOptions.find(
+      const foundContext = ContextOptions.find(
         (context) => context.value === filePath
       );
 
@@ -99,7 +63,7 @@ const ContextSelector = () => {
             <CommandList>
               <CommandEmpty>No framework found.</CommandEmpty>
               <CommandGroup>
-                {contextOptions.map((context) => (
+                {ContextOptions.map((context) => (
                   <CommandItem
                     key={context.value}
                     value={context.value}
@@ -110,7 +74,7 @@ const ContextSelector = () => {
                             (selected) => selected.value === context.value
                           )
                             ? []
-                            : contextOptions
+                            : ContextOptions
                         );
                       } else {
                         setSelectedContexts(
