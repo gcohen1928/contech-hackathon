@@ -97,6 +97,9 @@ class State(InputState):
     semantic_answers: Annotated[List[str], operator.add] = field(default_factory=list)
     """List of semantic answers"""
 
+    semantic_citations: Annotated[List[str], operator.add] = field(default_factory=list)
+    """List of semantic citations"""
+
     user_question: Optional[str] = field(default=None)
     """The current user question being asked of the agent"""
 

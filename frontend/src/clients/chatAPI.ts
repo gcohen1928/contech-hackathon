@@ -5,8 +5,14 @@ interface Message {
   content: string;
 }
 
+interface Citation {
+  source_filename: string;
+  page_number: number;
+}
+
 interface ChatResponse {
   message: string;
+  citations: Citation[];
 }
 
 export const sendChatMessage = async (

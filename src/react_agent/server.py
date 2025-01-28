@@ -57,12 +57,26 @@ async def chat(payload: ChatPayload):
         print("Error during graph invocation:", e)
         return {"message": "Sorry, I'm having trouble answering that question."}
 
+    # print("FINAL STATE:", final_state)
     final_msg = []
 
-    if final_state["reply"] is not None:
+    if "reply" in final_state and final_state["reply"] is not None:
         final_msg.append(final_state["reply"])
 
-    if final_state["user_question"] is not None:
+    if "user_question" in final_state and final_state["user_question"] is not None:
         final_msg.append(final_state["user_question"])
 
-    return {"message": "\n\n".join(final_msg)}
+    citations = []
+    seen_citations = set()
+
+    if "semantic_citations" in final_state:
+        for citation in final_state["semantic_citations"]:
+            citation_key = frozenset(citation.items())
+            if citation_key not in seen_citations:
+                citations.append(citation)
+                seen_citations.add(citation_key)
+
+    return {
+        "message": "\n\n".join(final_msg),
+        "citations": citations,
+    }

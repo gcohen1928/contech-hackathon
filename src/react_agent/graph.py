@@ -461,14 +461,24 @@ async def synthesize_query(query: str, allowed_filenames: List[str]):
     # Get context
     context = gather_query_context(query, allowed_filenames)
     base64_images = []
+    citations = []
 
     # Get images from context
     for result in context["results"][0]["hits"]:
+        source_filename = result["document"]["source_filename"]
+        page_number = result["document"]["page_number"]
+
         image_base64 = image_to_base64(
-            f"data/images/{result['document']['source_filename']}/page_{result['document']['page_number']}.png"
+            f"data/images/{source_filename}/page_{page_number}.png"
         )
 
         base64_images.append(image_base64)
+        citations.append(
+            {
+                "source_filename": source_filename,
+                "page_number": page_number,
+            }
+        )
 
     # Respond to query using images
     image_query_response = await acompletion(
@@ -492,7 +502,11 @@ async def synthesize_query(query: str, allowed_filenames: List[str]):
             },
         ],
     )
-    return image_query_response.choices[0].message.content
+
+    return {
+        "output": image_query_response.choices[0].message.content,
+        "citations": citations,
+    }
 
 
 async def semantic_search_execution(state: State, config: RunnableConfig) -> State:
@@ -518,10 +532,11 @@ async def semantic_search_execution(state: State, config: RunnableConfig) -> Sta
     try:
         # Use actual semantic search implementation
         semantic_answer = await synthesize_query(current_question, allowed_filenames)
-        print("SEMANTIC ANSWER", f"{current_question}: {semantic_answer}")
+        print("SEMANTIC ANSWER", f"{current_question}: {semantic_answer['output']}")
 
         return {
-            "semantic_answers": [f"{current_question}: {semantic_answer}"],
+            "semantic_answers": [f"{current_question}: {semantic_answer['output']}"],
+            "semantic_citations": semantic_answer["citations"],
         }
 
         # Update semantic answers

@@ -7,7 +7,8 @@ import { useEffect, useRef, useState } from "react";
 import ContextSelector from "./ContextSelector";
 import { MessageRole, sendChatMessage } from "@/clients/chatAPI";
 import { useMessagesStore } from "@/state/messages";
-import { useContextStore } from "@/state/context";
+import { ContextOptions, useContextStore } from "@/state/context";
+import { DOCUMENTS, useSelectedFile } from "@/state/selectedFile";
 
 interface Message {
   id: string;
@@ -62,6 +63,10 @@ const ChatTextbox = () => {
         id: crypto.randomUUID(),
         content: response.message,
         role: "assistant" as const,
+        citations: response.citations.map((c) => ({
+          sourceFilename: c.source_filename,
+          pageNumber: c.page_number,
+        })),
       });
     } catch (error) {
       console.error("Failed to send message:", error);
@@ -109,6 +114,7 @@ const ChatTextbox = () => {
 
 const Chat = () => {
   const { messages } = useMessagesStore();
+  const { setSelectedFile } = useSelectedFile();
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -137,7 +143,35 @@ const Chat = () => {
                     variant={message.role === "user" ? "sent" : "received"}
                     isLoading={message.id === "loading"}
                   >
-                    {message.content}
+                    <p>{message.content}</p>
+                    {message.citations && (
+                      <>
+                        <br />
+                        <ul className="list-disc list-inside">
+                          {message.citations?.map((citation) => (
+                            <li
+                              key={`citation-${citation.sourceFilename}-${citation.pageNumber}`}
+                            >
+                              <a
+                                onClick={() =>
+                                  setSelectedFile(
+                                    ContextOptions.find(
+                                      (d) =>
+                                        d.value.split("/").pop() ===
+                                        citation.sourceFilename
+                                    )?.value ?? null,
+                                    citation.pageNumber
+                                  )
+                                }
+                              >
+                                {citation.sourceFilename}, Page{" "}
+                                {citation.pageNumber}
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
                   </ChatBubbleMessage>
                 </ChatBubble>
               ))}

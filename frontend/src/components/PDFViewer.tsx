@@ -1,5 +1,5 @@
 import { useSelectedFile } from "@/state/selectedFile";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 
@@ -23,7 +23,7 @@ const PDFViewer = () => {
 
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
 
-  const { filePath } = useSelectedFile();
+  const { filePath, pageNumber } = useSelectedFile();
 
   const onDocumentLoadSuccess = useCallback(
     ({ numPages }: { numPages: number }): void => {
@@ -42,14 +42,16 @@ const PDFViewer = () => {
     [searchText]
   );
 
-  // TODO: auto-scroll to correct page based on returned context
+  useEffect(() => {
+    if (pageNumber && pageRefs.current[pageNumber - 1]) {
+      console.log("scrolling to page", pageNumber);
+      pageRefs.current[pageNumber - 1]?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [pageNumber]);
 
   return (
     <div className="flex flex-col h-full items-center justify-center p-6">
-      <div
-        // ref={documentRef}
-        className="flex flex-grow items-center justify-center overflow-y-auto p-4"
-      >
+      <div className="flex flex-grow items-center justify-center overflow-y-auto p-4">
         <Document
           file={filePath}
           onLoadSuccess={onDocumentLoadSuccess}
@@ -58,13 +60,17 @@ const PDFViewer = () => {
         >
           {numPages &&
             Array.from(new Array(numPages), (el, index) => (
-              <Page
+              <div
                 key={`page_${index + 1}`}
-                pageNumber={index + 1}
-                renderTextLayer={true}
-                renderAnnotationLayer={false}
-                customTextRenderer={textRenderer}
-              />
+                ref={(ref) => (pageRefs.current[index] = ref)}
+              >
+                <Page
+                  pageNumber={index + 1}
+                  renderTextLayer={true}
+                  renderAnnotationLayer={false}
+                  customTextRenderer={textRenderer}
+                />
+              </div>
             ))}
         </Document>
       </div>

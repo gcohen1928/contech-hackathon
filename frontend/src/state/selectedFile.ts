@@ -64,10 +64,14 @@ export const DATABASES = [
 
 interface SelectedFileState {
   filePath: string | null;
-  setSelectedFile: (path: string | null) => void;
+  pageNumber: number | null;
+  setSelectedFile: (path: string | null, pageNumber?: number) => void;
 }
 
 export const useSelectedFile = create<SelectedFileState>((set) => ({
   filePath: null,
-  setSelectedFile: (path) => set({ filePath: path })
+  pageNumber: null,
+  setSelectedFile: (path, pageNumber) =>
+    set({ filePath: path, pageNumber: pageNumber ?? null }),
 }))
+

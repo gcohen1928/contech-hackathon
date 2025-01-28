@@ -1,10 +1,16 @@
 import { create } from 'zustand'
 import { MessageRole } from '@/clients/chatAPI'
 
+interface AssistantCitation {
+  sourceFilename: string;
+  pageNumber: number;
+}
+
 interface Message {
   id: string
   content: string
   role: MessageRole
+  citations?: AssistantCitation[]
 }
 
 interface MessagesState {
